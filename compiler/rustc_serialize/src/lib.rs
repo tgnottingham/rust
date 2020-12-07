@@ -14,6 +14,7 @@ Core encoding and decoding interfaces.
 #![feature(nll)]
 #![feature(associated_type_bounds)]
 #![feature(min_const_generics)]
+#![feature(bufwriter_raw_buffer_access)]
 #![cfg_attr(test, feature(test))]
 #![allow(rustc::internal)]
 
