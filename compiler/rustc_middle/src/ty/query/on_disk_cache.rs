@@ -1,7 +1,7 @@
 use crate::dep_graph::{DepNodeIndex, SerializedDepNodeIndex};
 use crate::mir::interpret::{AllocDecodingSession, AllocDecodingState};
 use crate::mir::{self, interpret};
-use crate::ty::codec::{OpaqueEncoder, RefDecodable, TyDecoder, TyEncoder};
+use crate::ty::codec::{RefDecodable, TyDecoder, TyEncoder};
 use crate::ty::context::TyCtxt;
 use crate::ty::{self, Ty};
 use rustc_data_structures::fingerprint::{Fingerprint, FingerprintDecoder, FingerprintEncoder};
@@ -13,7 +13,10 @@ use rustc_hir::def_id::{CrateNum, DefId, DefIndex, LocalDefId, LOCAL_CRATE};
 use rustc_hir::definitions::DefPathHash;
 use rustc_hir::definitions::Definitions;
 use rustc_index::vec::{Idx, IndexVec};
-use rustc_serialize::{opaque, Decodable, Decoder, Encodable, Encoder};
+use rustc_serialize::{
+    opaque::{self, OpaqueEncoder},
+    Decodable, Decoder, Encodable, Encoder,
+};
 use rustc_session::{CrateDisambiguator, Session};
 use rustc_span::hygiene::{
     ExpnDataDecodeMode, ExpnDataEncodeMode, ExpnId, HygieneDecodeContext, HygieneEncodeContext,
@@ -402,7 +405,7 @@ impl<'sess> OnDiskCache<'sess> {
 
             // Encode the position of the footer as the last 8 bytes of the
             // file so we know where to look for it.
-            IntEncodedWithFixedSize(footer_pos).encode(encoder.encoder.opaque())?;
+            IntEncodedWithFixedSize(footer_pos).encode(encoder.encoder)?;
 
             // DO NOT WRITE ANYTHING TO THE ENCODER AFTER THIS POINT! The address
             // of the footer must be the last thing in the data stream.
@@ -959,8 +962,8 @@ where
     }
 }
 
-impl<'a, 'tcx> FingerprintEncoder for CacheEncoder<'a, 'tcx, rustc_serialize::opaque::Encoder> {
-    fn encode_fingerprint(&mut self, f: &Fingerprint) -> opaque::EncodeResult {
+impl<'a, 'tcx, E: OpaqueEncoder> FingerprintEncoder for CacheEncoder<'a, 'tcx, E> {
+    fn encode_fingerprint(&mut self, f: &Fingerprint) -> Result<(), E::Error> {
         f.encode_opaque(self.encoder)
     }
 }
@@ -1030,7 +1033,7 @@ where
         self.tcx
     }
     fn position(&self) -> usize {
-        self.encoder.encoder_position()
+        self.encoder.position()
     }
     fn type_shorthands(&mut self) -> &mut FxHashMap<Ty<'tcx>, usize> {
         &mut self.type_shorthands
@@ -1123,8 +1126,8 @@ impl IntEncodedWithFixedSize {
     pub const ENCODED_SIZE: usize = 8;
 }
 
-impl Encodable<opaque::Encoder> for IntEncodedWithFixedSize {
-    fn encode(&self, e: &mut opaque::Encoder) -> Result<(), !> {
+impl<E: OpaqueEncoder> Encodable<E> for IntEncodedWithFixedSize {
+    fn encode(&self, e: &mut E) -> Result<(), E::Error> {
         let start_pos = e.position();
         for i in 0..IntEncodedWithFixedSize::ENCODED_SIZE {
             ((self.0 >> (i * 8)) as u8).encode(e)?;
@@ -1177,7 +1180,7 @@ where
 
                 // Record position of the cache entry.
                 query_result_index
-                    .push((dep_node, AbsoluteBytePos::new(encoder.encoder.opaque().position())));
+                    .push((dep_node, AbsoluteBytePos::new(encoder.encoder.position())));
 
                 // Encode the type check tables with the `SerializedDepNodeIndex`
                 // as tag.

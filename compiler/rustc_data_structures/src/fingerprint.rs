@@ -1,6 +1,6 @@
 use crate::stable_hasher;
 use rustc_serialize::{
-    opaque::{self, EncodeResult},
+    opaque::{self, EncodeResult, FileEncodeResult, OpaqueEncoder},
     Decodable, Encodable,
 };
 use std::hash::{Hash, Hasher};
@@ -53,11 +53,10 @@ impl Fingerprint {
         format!("{:x}{:x}", self.0, self.1)
     }
 
-    pub fn encode_opaque(&self, encoder: &mut opaque::Encoder) -> EncodeResult {
+    pub fn encode_opaque<E: OpaqueEncoder>(&self, encoder: &mut E) -> Result<(), E::Error> {
         let bytes: [u8; 16] = unsafe { mem::transmute([self.0.to_le(), self.1.to_le()]) };
 
-        encoder.emit_raw_bytes(&bytes);
-        Ok(())
+        encoder.emit_raw_bytes(&bytes)
     }
 
     pub fn decode_opaque(decoder: &mut opaque::Decoder<'_>) -> Result<Fingerprint, String> {
@@ -140,8 +139,17 @@ impl<E: rustc_serialize::Encoder> FingerprintEncoder for E {
     }
 }
 
+// We'd prefer to implement `FingerprintEncoder` for any `OpaqueEncoder`
+// rather than `opaque::Encoder` and `opaque::FileEncoder` separately,
+// but specialization doesn't allow it.
 impl FingerprintEncoder for opaque::Encoder {
     fn encode_fingerprint(&mut self, f: &Fingerprint) -> EncodeResult {
+        f.encode_opaque(self)
+    }
+}
+
+impl FingerprintEncoder for opaque::FileEncoder {
+    fn encode_fingerprint(&mut self, f: &Fingerprint) -> FileEncodeResult {
         f.encode_opaque(self)
     }
 }

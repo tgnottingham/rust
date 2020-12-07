@@ -26,7 +26,10 @@ use rustc_middle::mir::interpret;
 use rustc_middle::traits::specialization_graph;
 use rustc_middle::ty::codec::TyEncoder;
 use rustc_middle::ty::{self, SymbolName, Ty, TyCtxt};
-use rustc_serialize::{opaque, Encodable, Encoder};
+use rustc_serialize::{
+    opaque::{self, OpaqueEncoder},
+    Encodable, Encoder,
+};
 use rustc_session::config::CrateType;
 use rustc_span::hygiene::{ExpnDataEncodeMode, HygieneEncodeContext, MacroKind};
 use rustc_span::symbol::{sym, Ident, Symbol};
