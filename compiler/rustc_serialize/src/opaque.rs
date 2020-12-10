@@ -247,6 +247,29 @@ impl FileEncoder {
 
         Ok(())
     }
+
+    #[inline]
+    fn write_one(&mut self, value: u8) -> FileEncodeResult {
+        // This is only a debug assert because we already ensured this in `new`.
+        debug_assert!(self.writer.capacity() >= 1);
+
+        if self.writer.len() >= self.writer.capacity() {
+            self.writer.flush()?;
+            debug_assert_eq!(self.writer.len(), 0);
+        }
+
+        let old_len = self.writer.len();
+
+        // SAFETY: The above check and `flush` ensures that there is enough
+        // room to write the input buffer to the writer's internal buffer.
+        unsafe {
+            self.writer.as_mut_ptr().add(old_len).write(value);
+            self.writer.set_len(old_len + 1);
+        }
+
+        self.position += 1;
+        Ok(())
+    }
 }
 
 macro_rules! bufwriter_write_leb128 {
@@ -309,7 +332,7 @@ impl serialize::Encoder for FileEncoder {
 
     #[inline]
     fn emit_u8(&mut self, v: u8) -> FileEncodeResult {
-        self.write_all(&[v])
+        self.write_one(v)
     }
 
     #[inline]
