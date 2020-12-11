@@ -384,7 +384,7 @@ impl<W: Write> BufWriter<W> {
 impl<W: Write> Write for BufWriter<W> {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if self.buf.len() + buf.len() < self.buf.capacity() {
+        if self.buf.len() + buf.len() <= self.buf.capacity() && buf.len() != self.buf.capacity() {
             // SAFETY: safe by above conditional.
             unsafe {
                 self.write_to_buffer_unchecked(buf)
@@ -398,7 +398,7 @@ impl<W: Write> Write for BufWriter<W> {
 
     #[inline]
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        if self.buf.len() + buf.len() < self.buf.capacity() {
+        if self.buf.len() + buf.len() <= self.buf.capacity() && buf.len() != self.buf.capacity() {
             // SAFETY: safe by above conditional.
             unsafe {
                 self.write_to_buffer_unchecked(buf)
@@ -414,7 +414,7 @@ impl<W: Write> Write for BufWriter<W> {
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         let total_len = bufs.iter().map(|b| b.len()).sum::<usize>();
 
-        if self.buf.len() + total_len < self.buf.capacity() {
+        if self.buf.len() + total_len <= self.buf.capacity() && total_len != self.buf.capacity() {
             // SAFETY: safe by above conditional.
             unsafe {
                 bufs.iter().for_each(|b| self.write_to_buffer_unchecked(b));
