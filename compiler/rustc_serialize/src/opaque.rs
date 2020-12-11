@@ -186,6 +186,7 @@ impl FileEncoder {
         FileEncoder { writer, position: 0 }
     }
 
+    /*
     #[inline]
     fn write_all(&mut self, buf: &[u8]) -> FileEncodeResult {
         let writer_capacity = self.writer.capacity();
@@ -225,6 +226,7 @@ impl FileEncoder {
     // In practice, this is only used when the client supplies an input larger
     // than our `BufWriter`'s buffer, and the hope is that never happens.
     fn write_all_unbuffered(&mut self, mut buf: &[u8]) -> FileEncodeResult {
+        assert!(false);
         debug_assert!(buf.len() > self.writer.capacity());
         let writer = self.writer.get_mut();
 
@@ -247,7 +249,9 @@ impl FileEncoder {
 
         Ok(())
     }
+    */
 
+    /*
     #[inline]
     fn write_one(&mut self, value: u8) -> FileEncodeResult {
         // This is only a debug assert because we already ensured this in `new`.
@@ -270,10 +274,12 @@ impl FileEncoder {
         self.position += 1;
         Ok(())
     }
+    */
 }
 
 macro_rules! bufwriter_write_leb128 {
     ($enc:expr, $value:expr, $int_ty:ty, $fun:ident) => {{
+        /*
         const MAX_ENCODED_LEN: usize = max_leb128_len!($int_ty);
 
         // This is only a debug assert because we already ensured this in `new`.
@@ -292,7 +298,10 @@ macro_rules! bufwriter_write_leb128 {
             $enc.writer.set_len($enc.writer.len() + encoded_len);
             $enc.position += encoded_len;
         }
+        */
 
+        let len = leb128::$fun(&mut $enc.writer, $value)?;
+        $enc.position += len;
         Ok(())
     }};
 }
@@ -307,57 +316,60 @@ impl serialize::Encoder for FileEncoder {
 
     #[inline]
     fn emit_usize(&mut self, v: usize) -> FileEncodeResult {
-        bufwriter_write_leb128!(self, v, usize, write_usize_leb128)
+        bufwriter_write_leb128!(self, v, usize, write_usize_leb128_x)
     }
 
     #[inline]
     fn emit_u128(&mut self, v: u128) -> FileEncodeResult {
-        bufwriter_write_leb128!(self, v, u128, write_u128_leb128)
+        bufwriter_write_leb128!(self, v, u128, write_u128_leb128_x)
     }
 
     #[inline]
     fn emit_u64(&mut self, v: u64) -> FileEncodeResult {
-        bufwriter_write_leb128!(self, v, u64, write_u64_leb128)
+        bufwriter_write_leb128!(self, v, u64, write_u64_leb128_x)
     }
 
     #[inline]
     fn emit_u32(&mut self, v: u32) -> FileEncodeResult {
-        bufwriter_write_leb128!(self, v, u32, write_u32_leb128)
+        bufwriter_write_leb128!(self, v, u32, write_u32_leb128_x)
     }
 
     #[inline]
     fn emit_u16(&mut self, v: u16) -> FileEncodeResult {
-        bufwriter_write_leb128!(self, v, u16, write_u16_leb128)
+        bufwriter_write_leb128!(self, v, u16, write_u16_leb128_x)
     }
 
     #[inline]
     fn emit_u8(&mut self, v: u8) -> FileEncodeResult {
-        self.write_one(v)
+        //self.write_one(v)
+        self.writer.write_all(&[v])?;
+        self.position += 1;
+        Ok(())
     }
 
     #[inline]
     fn emit_isize(&mut self, v: isize) -> FileEncodeResult {
-        bufwriter_write_leb128!(self, v, isize, write_isize_leb128)
+        bufwriter_write_leb128!(self, v, isize, write_isize_leb128_x)
     }
 
     #[inline]
     fn emit_i128(&mut self, v: i128) -> FileEncodeResult {
-        bufwriter_write_leb128!(self, v, i128, write_i128_leb128)
+        bufwriter_write_leb128!(self, v, i128, write_i128_leb128_x)
     }
 
     #[inline]
     fn emit_i64(&mut self, v: i64) -> FileEncodeResult {
-        bufwriter_write_leb128!(self, v, i64, write_i64_leb128)
+        bufwriter_write_leb128!(self, v, i64, write_i64_leb128_x)
     }
 
     #[inline]
     fn emit_i32(&mut self, v: i32) -> FileEncodeResult {
-        bufwriter_write_leb128!(self, v, i32, write_i32_leb128)
+        bufwriter_write_leb128!(self, v, i32, write_i32_leb128_x)
     }
 
     #[inline]
     fn emit_i16(&mut self, v: i16) -> FileEncodeResult {
-        bufwriter_write_leb128!(self, v, i16, write_i16_leb128)
+        bufwriter_write_leb128!(self, v, i16, write_i16_leb128_x)
     }
 
     #[inline]
@@ -398,7 +410,9 @@ impl serialize::Encoder for FileEncoder {
 impl OpaqueEncoder for FileEncoder {
     #[inline]
     fn emit_raw_bytes(&mut self, s: &[u8]) -> FileEncodeResult {
-        self.write_all(s)
+        self.writer.write_all(s)?;
+        self.position += s.len();
+        Ok(())
     }
 
     #[inline]

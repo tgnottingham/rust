@@ -1,5 +1,8 @@
 #![macro_use]
 
+use std::io::{BufWriter, Write};
+use std::fs::File;
+
 macro_rules! max_leb128_len {
     ($int_ty:ty) => {
         (std::mem::size_of::<$int_ty>() * 8 + 6) / 7
@@ -9,6 +12,38 @@ macro_rules! max_leb128_len {
 pub const fn max_leb128_len() -> usize {
     max_leb128_len!(u128)
 }
+
+macro_rules! impl_write_unsigned_leb128_x {
+    ($fn_name:ident, $int_ty:ty) => {
+        #[inline]
+        pub fn $fn_name(
+            out: &mut BufWriter<File>,
+            mut value: $int_ty,
+        ) -> Result<usize, std::io::Error> {
+            let mut i = 0;
+            loop {
+                if value < 0x80 {
+                    out.write_all(&[value as u8])?;
+                    i += 1;
+                    break;
+                } else {
+                    out.write_all(&[((value & 0x7f) | 0x80) as u8])?;
+                    value >>= 7;
+                    i += 1;
+                }
+            }
+
+            Ok(i)
+        }
+    };
+}
+
+impl_write_unsigned_leb128_x!(write_u16_leb128_x, u16);
+impl_write_unsigned_leb128_x!(write_u32_leb128_x, u32);
+impl_write_unsigned_leb128_x!(write_u64_leb128_x, u64);
+impl_write_unsigned_leb128_x!(write_u128_leb128_x, u128);
+impl_write_unsigned_leb128_x!(write_usize_leb128_x, usize);
+
 
 macro_rules! impl_write_unsigned_leb128 {
     ($fn_name:ident, $int_ty:ty) => {
@@ -116,6 +151,44 @@ impl_write_signed_leb128!(write_i32_leb128, i32);
 impl_write_signed_leb128!(write_i64_leb128, i64);
 impl_write_signed_leb128!(write_i128_leb128, i128);
 impl_write_signed_leb128!(write_isize_leb128, isize);
+
+macro_rules! impl_write_signed_leb128_x {
+    ($fn_name:ident, $int_ty:ty) => {
+        #[inline]
+        pub fn $fn_name(
+            out: &mut BufWriter<File>,
+            mut value: $int_ty,
+        ) -> Result<usize, std::io::Error> {
+            let mut i = 0;
+
+            loop {
+                let mut byte = (value as u8) & 0x7f;
+                value >>= 7;
+                let more =
+                    !(((value == 0) && ((byte & 0x40) == 0)) || ((value == -1) && ((byte & 0x40) != 0)));
+
+                if more {
+                    byte |= 0x80; // Mark this byte to show that more bytes will follow.
+                }
+
+                out.write_all(&[byte])?;
+                i += 1;
+
+                if !more {
+                    break;
+                }
+            }
+
+            Ok(i)
+        }
+    }
+}
+
+impl_write_signed_leb128_x!(write_i16_leb128_x, i16);
+impl_write_signed_leb128_x!(write_i32_leb128_x, i32);
+impl_write_signed_leb128_x!(write_i64_leb128_x, i64);
+impl_write_signed_leb128_x!(write_i128_leb128_x, i128);
+impl_write_signed_leb128_x!(write_isize_leb128_x, isize);
 
 #[inline]
 pub fn read_signed_leb128(data: &[u8], start_position: usize) -> (i128, usize) {

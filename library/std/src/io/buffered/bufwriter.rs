@@ -2,6 +2,7 @@ use crate::fmt;
 use crate::io::{
     self, Error, ErrorKind, IntoInnerError, IoSlice, Seek, SeekFrom, Write, DEFAULT_BUF_SIZE,
 };
+use crate::ptr;
 
 /// Wraps a writer and buffers its output.
 ///
@@ -181,7 +182,12 @@ impl<W: Write> BufWriter<W> {
     pub(super) fn write_to_buf(&mut self, buf: &[u8]) -> usize {
         let available = self.buf.capacity() - self.buf.len();
         let amt_to_buffer = available.min(buf.len());
-        self.buf.extend_from_slice(&buf[..amt_to_buffer]);
+
+        // SAFETY: `amt_to_buffer` is <= buffer's spare capacity by construction.
+        unsafe {
+            self.write_to_buffer_unchecked(&buf[..amt_to_buffer]);
+        }
+
         amt_to_buffer
     }
 
@@ -241,20 +247,6 @@ impl<W: Write> BufWriter<W> {
         &self.buf
     }
 
-    /// FIXME Document.
-    #[inline]
-    #[unstable(feature = "bufwriter_raw_buffer_access", issue = "none")]
-    pub fn as_ptr(&mut self) -> *const u8 {
-        self.buf.as_ptr()
-    }
-
-    /// FIXME Document.
-    #[inline]
-    #[unstable(feature = "bufwriter_raw_buffer_access", issue = "none")]
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.buf.as_mut_ptr()
-    }
-
     /// Returns the number of bytes the internal buffer can hold without flushing.
     ///
     /// # Examples
@@ -273,20 +265,6 @@ impl<W: Write> BufWriter<W> {
     #[stable(feature = "buffered_io_capacity", since = "1.46.0")]
     pub fn capacity(&self) -> usize {
         self.buf.capacity()
-    }
-
-    /// FIXME Document.
-    #[inline]
-    #[unstable(feature = "bufwriter_raw_buffer_access", issue = "none")]
-    pub fn len(&self) -> usize {
-        self.buf.len()
-    }
-
-    /// FIXME Document.
-    #[inline]
-    #[unstable(feature = "bufwriter_raw_buffer_access", issue = "none")]
-    pub unsafe fn set_len(&mut self, new_len: usize) {
-        self.buf.set_len(new_len);
     }
 
     /// Unwraps this `BufWriter<W>`, returning the underlying writer.
@@ -315,14 +293,11 @@ impl<W: Write> BufWriter<W> {
             Ok(()) => Ok(self.inner.take().unwrap()),
         }
     }
-}
 
-#[stable(feature = "rust1", since = "1.0.0")]
-impl<W: Write> Write for BufWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if self.buf.len() + buf.len() > self.buf.capacity() {
-            self.flush_buf()?;
-        }
+    #[inline(never)]
+    fn flush_and_write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.flush_buf()?;
+
         // FIXME: Why no len > capacity? Why not buffer len == capacity? #72919
         if buf.len() >= self.buf.capacity() {
             self.panicked = true;
@@ -330,19 +305,26 @@ impl<W: Write> Write for BufWriter<W> {
             self.panicked = false;
             r
         } else {
-            self.buf.extend_from_slice(buf);
+            // SAFETY: We just called `self.flush_buf()`, so `self.buf.len()` is 0, and
+            // we entered this else block because `buf.len < self.buf.capacity()`.
+            // Therefore, `self.buf.len() + buf.len() <= self.buf.capacity()`.
+            unsafe {
+                self.write_to_buffer_unchecked(buf);
+            }
+
             Ok(buf.len())
         }
+
     }
 
-    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+    #[inline(never)]
+    fn flush_and_write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         // Normally, `write_all` just calls `write` in a loop. We can do better
         // by calling `self.get_mut().write_all()` directly, which avoids
         // round trips through the buffer in the event of a series of partial
         // writes in some circumstances.
-        if self.buf.len() + buf.len() > self.buf.capacity() {
-            self.flush_buf()?;
-        }
+        self.flush_buf()?;
+
         // FIXME: Why no len > capacity? Why not buffer len == capacity? #72919
         if buf.len() >= self.buf.capacity() {
             self.panicked = true;
@@ -350,16 +332,23 @@ impl<W: Write> Write for BufWriter<W> {
             self.panicked = false;
             r
         } else {
-            self.buf.extend_from_slice(buf);
+            // SAFETY: We just called `self.flush_buf()`, so `self.buf.len()` is 0, and
+            // we entered this else block because `buf.len < self.buf.capacity()`.
+            // Therefore, `self.buf.len() + buf.len() <= self.buf.capacity()`.
+            unsafe {
+                self.write_to_buffer_unchecked(buf);
+            }
+
             Ok(())
         }
     }
 
-    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+    #[inline(never)]
+    fn flush_and_write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        self.flush_buf()?;
+
         let total_len = bufs.iter().map(|b| b.len()).sum::<usize>();
-        if self.buf.len() + total_len > self.buf.capacity() {
-            self.flush_buf()?;
-        }
+
         // FIXME: Why no len > capacity? Why not buffer len == capacity? #72919
         if total_len >= self.buf.capacity() {
             self.panicked = true;
@@ -367,8 +356,73 @@ impl<W: Write> Write for BufWriter<W> {
             self.panicked = false;
             r
         } else {
-            bufs.iter().for_each(|b| self.buf.extend_from_slice(b));
+            // SAFETY: We just called `self.flush_buf()`, so `self.buf.len()` is 0, and
+            // we entered this else block because `total_len < self.buf.capacity()`.
+            // Therefore, `self.buf.len() + buf.len() <= self.buf.capacity()` for each buf.
+            unsafe {
+                bufs.iter().for_each(|b| self.write_to_buffer_unchecked(b));
+            };
+
             Ok(total_len)
+        }
+    }
+
+    // SAFETY: Requires input buffer length is less than or equal to spare capacity of internal
+    // buffer. In other words, requires that `self.buf.len() + buf.len() <= self.buf.capacity()`.
+    #[inline(always)]
+    unsafe fn write_to_buffer_unchecked(&mut self, buf: &[u8]) {
+        let old_len = self.buf.len();
+        let buf_len = buf.len();
+        let src = buf.as_ptr();
+        let dst = self.buf.as_mut_ptr().add(old_len);
+        ptr::copy_nonoverlapping(src, dst, buf_len);
+        self.buf.set_len(old_len + buf_len);
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<W: Write> Write for BufWriter<W> {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.buf.len() + buf.len() < self.buf.capacity() {
+            // SAFETY: safe by above conditional.
+            unsafe {
+                self.write_to_buffer_unchecked(buf)
+            };
+
+            Ok(buf.len())
+        } else {
+            self.flush_and_write(buf)
+        }
+    }
+
+    #[inline]
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        if self.buf.len() + buf.len() < self.buf.capacity() {
+            // SAFETY: safe by above conditional.
+            unsafe {
+                self.write_to_buffer_unchecked(buf)
+            };
+
+            Ok(())
+        } else {
+            self.flush_and_write_all(buf)
+        }
+    }
+
+    #[inline]
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        let total_len = bufs.iter().map(|b| b.len()).sum::<usize>();
+
+        if self.buf.len() + total_len < self.buf.capacity() {
+            // SAFETY: safe by above conditional.
+            unsafe {
+                bufs.iter().for_each(|b| self.write_to_buffer_unchecked(b));
+            };
+
+            Ok(total_len)
+        } else {
+            self.flush_and_write_vectored(bufs)
         }
     }
 
