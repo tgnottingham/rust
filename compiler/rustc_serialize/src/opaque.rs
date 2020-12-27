@@ -4,6 +4,7 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::mem::MaybeUninit;
+use std::ptr;
 
 // -----------------------------------------------------------------------------
 // Encoder
@@ -173,8 +174,10 @@ impl OpaqueEncoder for Encoder {
 pub type FileEncodeResult = Result<(), io::Error>;
 
 pub struct FileEncoder {
-    writer: BufWriter<File>,
+    buf: Box<[MaybeUninit<u8>]>,
+    used: usize,
     position: usize,
+    file: File,
 }
 
 impl FileEncoder {
@@ -183,32 +186,66 @@ impl FileEncoder {
         // here so that we don't have to check or handle this on every write.
         assert!(writer.capacity() >= max_leb128_len());
 
-        FileEncoder { writer, position: 0 }
+        FileEncoder {
+            buf: Box::new_uninit_slice(writer.capacity()),
+            used: 0,
+            position: 0,
+            file: writer.into_inner().unwrap(),
+        }
+    }
+
+    #[inline]
+    fn capacity(&self) -> usize {
+        self.buf.len()
+    }
+
+    #[inline]
+    fn write_one(&mut self, value: u8) -> FileEncodeResult {
+        // This is only a debug assert because we already ensured this in `new`.
+        debug_assert!(self.capacity() >= 1);
+
+        let mut used = self.used;
+
+        if used >= self.capacity() {
+            self.flush()?;
+            used = 0;
+        }
+
+        // SAFETY: The above check and `flush` ensures that there is enough
+        // room to write the input buffer to the buffer.
+        unsafe {
+            *MaybeUninit::slice_as_mut_ptr(&mut self.buf).add(used) = value;
+        }
+
+        self.used = used + 1;
+        self.position += 1;
+
+        Ok(())
     }
 
     #[inline]
     fn write_all(&mut self, buf: &[u8]) -> FileEncodeResult {
-        let writer_capacity = self.writer.capacity();
+        let capacity = self.capacity();
         let buf_len = buf.len();
+        let mut used = self.used;
 
-        if buf_len <= writer_capacity {
-            if buf_len > writer_capacity - self.writer.len() {
-                self.writer.flush()?;
-                debug_assert_eq!(self.writer.len(), 0);
+        if buf_len <= capacity {
+            if buf_len > capacity - used {
+                self.flush()?;
+                used = 0;
             }
-
-            let old_len = self.writer.len();
-            let src = buf.as_ptr();
 
             // SAFETY: The above check and `flush` ensures that there is enough
-            // room to write the input buffer to the writer's internal buffer.
+            // room to write the input buffer to the buffer.
             unsafe {
-                let dst = self.writer.as_mut_ptr().add(old_len);
-                std::ptr::copy_nonoverlapping(src, dst, buf_len);
-                self.writer.set_len(old_len + buf_len);
+                let src = buf.as_ptr();
+                let dst = MaybeUninit::slice_as_mut_ptr(&mut self.buf).add(used);
+                ptr::copy_nonoverlapping(src, dst, buf_len);
             }
 
+            self.used = used + buf_len;
             self.position += buf_len;
+
             Ok(())
         } else {
             self.write_all_unbuffered(buf)
@@ -225,11 +262,14 @@ impl FileEncoder {
     // In practice, this is only used when the client supplies an input larger
     // than our `BufWriter`'s buffer, and the hope is that never happens.
     fn write_all_unbuffered(&mut self, mut buf: &[u8]) -> FileEncodeResult {
-        debug_assert!(buf.len() > self.writer.capacity());
-        let writer = self.writer.get_mut();
+        debug_assert!(buf.len() > self.capacity());
+
+        if self.used > 0 {
+            self.flush()?;
+        }
 
         while !buf.is_empty() {
-            match writer.write(buf) {
+            match self.file.write(buf) {
                 Ok(0) => {
                     return Err(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -248,27 +288,84 @@ impl FileEncoder {
         Ok(())
     }
 
-    #[inline]
-    fn write_one(&mut self, value: u8) -> FileEncodeResult {
-        // This is only a debug assert because we already ensured this in `new`.
-        debug_assert!(self.writer.capacity() >= 1);
-
-        if self.writer.len() >= self.writer.capacity() {
-            self.writer.flush()?;
-            debug_assert_eq!(self.writer.len(), 0);
+    fn flush(&mut self) -> FileEncodeResult {
+        /// Helper struct to ensure the buffer is updated after all the writes
+        /// are complete. It tracks the number of written bytes and drains them
+        /// all from the front of the buffer when dropped.
+        struct BufGuard<'a> {
+            buffer: &'a mut [u8],
+            len: &'a mut usize,
+            written: usize,
         }
 
-        let old_len = self.writer.len();
+        impl<'a> BufGuard<'a> {
+            fn new(buffer: &'a mut [u8], len: &'a mut usize) -> Self {
+                Self { buffer, len, written: 0 }
+            }
 
-        // SAFETY: The above check and `flush` ensures that there is enough
-        // room to write the input buffer to the writer's internal buffer.
-        unsafe {
-            self.writer.as_mut_ptr().add(old_len).write(value);
-            self.writer.set_len(old_len + 1);
+            /// The unwritten part of the buffer
+            fn remaining(&self) -> &[u8] {
+                &self.buffer[self.written..]
+            }
+
+            /// Flag some bytes as removed from the front of the buffer
+            fn consume(&mut self, amt: usize) {
+                self.written += amt;
+            }
+
+            /// true if all of the bytes have been written
+            fn done(&self) -> bool {
+                self.written >= *self.len
+            }
         }
 
-        self.position += 1;
+        impl Drop for BufGuard<'_> {
+            fn drop(&mut self) {
+                if self.written > 0 {
+                    if self.done() {
+                        *self.len = 0;
+                    } else {
+                        let left = *self.len - self.written;
+
+                        unsafe {
+                            let src = self.buffer.as_ptr().add(self.written);
+                            let dst = self.buffer.as_mut_ptr();
+                            ptr::copy(src, dst, left);
+                        }
+
+                        *self.len = left;
+                    }
+                }
+            }
+        }
+
+        // TODO Consider unchecked access.
+        let mut guard = BufGuard::new(
+            unsafe { MaybeUninit::slice_assume_init_mut(&mut self.buf[..self.used]) },
+            &mut self.used,
+        );
+
+        while !guard.done() {
+            match self.file.write(guard.remaining()) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write the buffered data",
+                    ));
+                }
+                Ok(n) => guard.consume(n),
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+
         Ok(())
+    }
+}
+
+impl Drop for FileEncoder {
+    fn drop(&mut self) {
+        let _result = self.flush();
     }
 }
 
@@ -277,21 +374,25 @@ macro_rules! bufwriter_write_leb128 {
         const MAX_ENCODED_LEN: usize = max_leb128_len!($int_ty);
 
         // This is only a debug assert because we already ensured this in `new`.
-        debug_assert!($enc.writer.capacity() >= MAX_ENCODED_LEN);
+        debug_assert!($enc.capacity() >= MAX_ENCODED_LEN);
 
-        if MAX_ENCODED_LEN > $enc.writer.capacity() - $enc.writer.len() {
-            $enc.writer.flush()?;
+        let mut used = $enc.used;
+
+        if MAX_ENCODED_LEN > $enc.capacity() - used {
+            $enc.flush()?;
+            used = 0;
         }
 
         // SAFETY: The above check and flush ensures that there is enough
-        // room to write the encoded value to the writer's internal buffer.
-        unsafe {
-            let buf = &mut *($enc.writer.as_mut_ptr().add($enc.writer.len())
-                as *mut [MaybeUninit<u8>; MAX_ENCODED_LEN]);
-            let encoded_len = leb128::$fun(buf, $value);
-            $enc.writer.set_len($enc.writer.len() + encoded_len);
-            $enc.position += encoded_len;
-        }
+        // room to write the encoded value to the buffer.
+        let buf = unsafe {
+            &mut *($enc.buf.as_mut_ptr().add(used)
+                as *mut [MaybeUninit<u8>; MAX_ENCODED_LEN])
+        };
+
+        let encoded_len = leb128::$fun(buf, $value);
+        $enc.used = used + encoded_len;
+        $enc.position += encoded_len;
 
         Ok(())
     }};
