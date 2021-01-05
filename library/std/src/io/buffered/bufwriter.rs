@@ -339,7 +339,7 @@ impl<W: Write> BufWriter<W> {
     // If this function ends up being called frequently relative to `write`,
     // it's likely a sign that the client is using an improperly sized buffer
     // or their write patterns are somewhat pathological.
-    #[inline(never)]
+    #[cold]
     fn write_cold(&mut self, buf: &[u8]) -> io::Result<usize> {
         if buf.len() > self.spare_capacity() {
             self.flush_buf()?;
@@ -368,12 +368,10 @@ impl<W: Write> BufWriter<W> {
         }
     }
 
-    // Ensure this function does not get inlined into `write_all`, so that it
-    // remains inlineable and its common path remains as short as possible.
     // If this function ends up being called frequently relative to `write_all`,
     // it's likely a sign that the client is using an improperly sized buffer
     // or their write patterns are somewhat pathological.
-    #[inline(never)]
+    #[cold]
     fn write_all_cold(&mut self, buf: &[u8]) -> io::Result<()> {
         // Normally, `write_all` just calls `write` in a loop. We can do better
         // by calling `self.get_mut().write_all()` directly, which avoids
@@ -409,7 +407,7 @@ impl<W: Write> BufWriter<W> {
 
     // SAFETY: Requires `buf.len() <= self.buf.capacity() - self.buf.len()`,
     // i.e., that input buffer length is less than or equal to spare capacity.
-    #[inline(always)]
+    #[inline]
     unsafe fn write_to_buffer_unchecked(&mut self, buf: &[u8]) {
         debug_assert!(buf.len() <= self.spare_capacity());
         let old_len = self.buf.len();
@@ -528,8 +526,8 @@ impl<W: Write> Write for BufWriter<W> {
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        // FIXME: Consider applying `#[inline]` / `#[inline(never)]` optimizations already applied
-        // to `write` and `write_all`. The performance benefits can be significant. See #79930.
+        // FIXME: Consider applying `#[inline]` / `#[cold]` optimization already applied to
+        // `write` and `write_all`. The performance benefits can be significant. See #79930.
         if self.get_ref().is_write_vectored() {
             // We have to handle the possibility that the total length of the buffers overflows
             // `usize` (even though this can only happen if multiple `IoSlice`s reference the
